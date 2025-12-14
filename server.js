@@ -218,6 +218,16 @@ app.get('/fetch-grades', async (req, res) => {
 
         const gradesData = [];
 
+        const gradeValues = {
+            '6': 6, '6-': 5.75,
+            '5+': 5.5, '5': 5, '5-': 4.75,
+            '4+': 4.5, '4': 4, '4-': 3.75,
+            '3+': 3.5, '3': 3, '3-': 2.75,
+            '2+': 2.5, '2': 2, '2-': 1.75,
+            '1+': 1.5, '1': 1, '1-': 0.75,
+            '0': 0
+        };
+
         $('table.decorated.stretch > tbody > tr').each((i, el) => {
             const row = $(el);
             if (row.attr('style')?.includes('display: none')) return;
@@ -230,12 +240,51 @@ app.get('/fetch-grades', async (req, res) => {
             if (!subject) return;
 
             const grades = [];
+            let sumWeighted = 0;
+            let sumWeights = 0;
+
             row.find('.grade-box a.ocena').each((j, gradeEl) => {
-                grades.push($(gradeEl).text().trim());
+                const el = $(gradeEl);
+                const text = el.text().trim();
+                const title = el.attr('title') || '';
+
+                // Extract weight from title, e.g., "Waga: 2"
+                let weight = 1;
+                const weightMatch = title.match(/Waga: ?(\d+)/);
+                if (weightMatch) {
+                    weight = parseInt(weightMatch[1]);
+                }
+
+                // Determine numerical value
+                let value = null;
+                if (gradeValues.hasOwnProperty(text)) {
+                    value = gradeValues[text];
+                } else {
+                    // Try to parse simple number if not in map
+                    const parsed = parseFloat(text);
+                    if (!isNaN(parsed)) value = parsed;
+                }
+
+                if (value !== null) {
+                    // Ignore weights of 0 (often used for information only)
+                    if (weight > 0) {
+                        sumWeighted += value * weight;
+                        sumWeights += weight;
+                    }
+                }
+
+                grades.push({
+                    grade: text,
+                    weight: weight,
+                    value: value,
+                    desc: title // Optional: keep full description for debug
+                });
             });
 
+            const average = sumWeights > 0 ? (sumWeighted / sumWeights).toFixed(2) : '-';
+
             if (subject && subject !== 'Zachowanie') {
-                gradesData.push({ subject, grades });
+                gradesData.push({ subject, grades, average });
             }
         });
 
@@ -243,6 +292,192 @@ app.get('/fetch-grades', async (req, res) => {
 
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch grades', details: error.message });
+    }
+});
+
+app.get('/fetch-attendance', async (req, res) => {
+    const attendanceUrl = 'https://synergia.librus.pl/przegladaj_nb/uczen';
+
+    try {
+        const response = await client.get(attendanceUrl);
+        const $ = cheerio.load(response.data);
+
+        const attendanceData = [];
+
+        $('table.decorated.center.big tr').each((i, el) => {
+            const row = $(el);
+
+            if (row.find('th').length > 0) return;
+            if (row.hasClass('line1') && row.find('td').length === 1) return;
+
+            const cells = row.find('td');
+            if (cells.length < 2) return;
+
+            const dateText = $(cells[0]).text().trim();
+            if (!dateText || dateText === 'Data' || dateText === '' || dateText.includes('Suma') || dateText.includes('Okres')) return;
+
+            const lessonBoxes = $(cells[1]).find('p.box');
+            const absences = [];
+
+            lessonBoxes.each((idx, box) => {
+                const link = $(box).find('a');
+                if (link.length > 0) {
+                    const type = link.text().trim();
+                    const title = link.attr('title') || '';
+
+                    const lessonMatch = title.match(/Lekcja: ([^\n<]+)/);
+                    const typeMatch = title.match(/Rodzaj: ([^\n<]+)/);
+                    const hourMatch = title.match(/Godzina lekcyjna: (\d+)/);
+
+                    absences.push({
+                        lessonNumber: hourMatch ? parseInt(hourMatch[1]) : idx + 1,
+                        type: typeMatch ? typeMatch[1] : type,
+                        lesson: lessonMatch ? lessonMatch[1] : 'Unknown'
+                    });
+                }
+            });
+
+            if (absences.length > 0) {
+                attendanceData.push({
+                    date: dateText,
+                    absences: absences
+                });
+            }
+        });
+
+        res.json({ status: 'success', attendance: attendanceData });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch attendance', details: error.message });
+    }
+});
+
+app.get('/calculate-attendance-percentage', async (req, res) => {
+    try {
+        const realizedLessons = {};
+        const absences = {};
+
+        let page = 0;
+        let hasMorePages = true;
+
+        while (hasMorePages) {
+            const url = 'https://synergia.librus.pl/zrealizowane_lekcje';
+
+            const formData = new URLSearchParams();
+            formData.append('data1', '2025-09-01');
+            formData.append('data2', '2025-11-29');
+            formData.append('filtruj_id_przedmiotu', '-1');
+            formData.append('filtruj_realizacje', 'Filtruj');
+            formData.append('numer_strony1001', page.toString());
+            formData.append('porcjowanie_pojemnik1001', '1001');
+
+            const response = await client.post(url, formData, {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            });
+
+            const $ = cheerio.load(response.data);
+
+            $('table.decorated tbody tr').each((i, el) => {
+                const row = $(el);
+                const cells = row.find('td');
+
+                if (cells.length < 4) return;
+
+                const subjectCell = $(cells[3]);
+                const subjectText = subjectCell.find('b').text().trim();
+
+                if (!subjectText) return;
+
+                if (!realizedLessons[subjectText]) {
+                    realizedLessons[subjectText] = 0;
+                }
+                realizedLessons[subjectText]++;
+            });
+
+            const nextPageLink = $('.pagination li a').filter((i, el) => {
+                return $(el).text().includes('Następna');
+            });
+
+            if (nextPageLink.length === 0) {
+                hasMorePages = false;
+            } else {
+                page++;
+                if (page > 30) hasMorePages = false;
+            }
+        }
+
+        const absenceResponse = await client.get('https://synergia.librus.pl/przegladaj_nb/uczen');
+        const $abs = cheerio.load(absenceResponse.data);
+
+        $abs('table.decorated.center.big tr').each((i, el) => {
+            const row = $abs(el);
+
+            if (row.find('th').length > 0) return;
+            if (row.hasClass('line1') && row.find('td').length === 1) return;
+
+            const cells = row.find('td');
+            if (cells.length < 2) return;
+
+            const dateText = $abs(cells[0]).text().trim();
+            if (!dateText || dateText === 'Data' || dateText === '' || dateText.includes('Suma') || dateText.includes('Okres')) return;
+
+            const lessonBoxes = $abs(cells[1]).find('p.box');
+
+            lessonBoxes.each((idx, box) => {
+                const link = $abs(box).find('a');
+                if (link.length > 0) {
+                    const title = link.attr('title') || '';
+                    const lessonMatch = title.match(/Lekcja: ([^\n<]+)/);
+                    const typeMatch = title.match(/Rodzaj: ([^\n<]+)/);
+
+                    if (lessonMatch && typeMatch && (typeMatch[1] === 'nieobecność' || typeMatch[1] === 'nieobecność uspr.')) {
+                        const subject = lessonMatch[1];
+                        if (!absences[subject]) {
+                            absences[subject] = 0;
+                        }
+                        absences[subject]++;
+                    }
+                }
+            });
+        });
+
+        const attendanceStats = [];
+
+        for (const subject in realizedLessons) {
+            const total = realizedLessons[subject];
+            const absent = absences[subject] || 0;
+            const present = total - absent;
+            const percentage = total > 0 ? ((present / total) * 100).toFixed(2) : 0;
+
+            // Calculate how many MORE lessons can be missed to reach exactly 50%
+            // Formula derived from: present / (total + x) = 0.5  =>  2 * present = total + x  =>  x = 2 * present - total
+            const absencesUntil50 = (2 * present) - total;
+
+            attendanceStats.push({
+                subject: subject,
+                totalLessons: total,
+                absences: absent,
+                present: present,
+                attendancePercentage: parseFloat(percentage),
+                absencesUntil50Percent: absencesUntil50
+            });
+        }
+
+        attendanceStats.sort((a, b) => a.attendancePercentage - b.attendancePercentage);
+
+        res.json({
+            status: 'success',
+            stats: attendanceStats,
+            summary: {
+                totalSubjects: attendanceStats.length,
+                averageAttendance: (attendanceStats.reduce((sum, s) => sum + s.attendancePercentage, 0) / attendanceStats.length).toFixed(2)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to calculate attendance', details: error.message });
     }
 });
 

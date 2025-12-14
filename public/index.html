@@ -37,7 +37,8 @@
             margin-bottom: 20px;
         }
 
-        h2 {
+        h2,
+        h3 {
             text-align: center;
             margin-bottom: 1.5rem;
             color: var(--primary-color);
@@ -125,7 +126,9 @@
             display: none;
         }
 
-        #grades-container {
+        #grades-container,
+        #attendance-container,
+        #stats-container {
             width: 100%;
             max-width: 800px;
             margin-top: 20px;
@@ -170,6 +173,28 @@
             margin: 2px;
             font-weight: bold;
             color: #495057;
+            cursor: help;
+        }
+
+        .attendance-day {
+            background: white;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        .attendance-day h4 {
+            margin: 0 0 10px 0;
+            color: var(--primary-color);
+        }
+
+        .absence-item {
+            padding: 8px;
+            margin: 5px 0;
+            background: #f8f9fa;
+            border-left: 3px solid var(--info-color);
+            border-radius: 4px;
         }
 
         .hidden {
@@ -196,6 +221,8 @@
 
         <button id="navButton" class="btn-success hidden">Go to e-Dziennik</button>
         <button id="gradesButton" class="btn-info hidden">Show Grades</button>
+        <button id="attendanceButton" class="btn-info hidden">Show Attendance</button>
+        <button id="statsButton" class="btn-info hidden">Calculate Attendance %</button>
     </div>
 
     <div id="logs-container"></div>
@@ -207,6 +234,32 @@
                 <tr>
                     <th>Przedmiot</th>
                     <th>Oceny</th>
+                    <th>Średnia</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="attendance-container">
+        <h3>Nieobecności</h3>
+        <div id="attendanceList"></div>
+    </div>
+
+    <div id="stats-container">
+        <h3>Frekwencja (%)</h3>
+        <div id="statsSummary"
+            style="background: white; padding: 15px; margin-bottom: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
+        </div>
+        <table id="statsTable">
+            <thead>
+                <tr>
+                    <th>Przedmiot</th>
+                    <th>Zrealizowane</th>
+                    <th>Nieobecności</th>
+                    <th>Obecności</th>
+                    <th>Frekwencja</th>
+                    <th>Nieob. do 50%</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -217,9 +270,16 @@
         const loginForm = document.getElementById('loginForm');
         const navButton = document.getElementById('navButton');
         const gradesButton = document.getElementById('gradesButton');
+        const attendanceButton = document.getElementById('attendanceButton');
+        const statsButton = document.getElementById('statsButton');
         const logsContainer = document.getElementById('logs-container');
         const gradesContainer = document.getElementById('grades-container');
+        const attendanceContainer = document.getElementById('attendance-container');
+        const statsContainer = document.getElementById('stats-container');
         const gradesTableBody = document.querySelector('#gradesTable tbody');
+        const attendanceList = document.getElementById('attendanceList');
+        const statsTableBody = document.querySelector('#statsTable tbody');
+        const statsSummary = document.getElementById('statsSummary');
 
         function log(message, type = 'info') {
             logsContainer.style.display = 'block';
@@ -273,6 +333,8 @@
                 if (data.status === 'success') {
                     log('Navigation successful!', 'success');
                     gradesButton.classList.remove('hidden');
+                    attendanceButton.classList.remove('hidden');
+                    statsButton.classList.remove('hidden');
                     navButton.classList.add('hidden');
                 } else {
                     log(`Navigation failed: ${data.message}`, 'error');
@@ -297,9 +359,52 @@
                     log(`Fetched ${data.grades.length} subjects.`, 'success');
                     renderGrades(data.grades);
                     gradesContainer.style.display = 'block';
-                    gradesButton.classList.add('hidden');
+                    attendanceContainer.style.display = 'none';
+                    statsContainer.style.display = 'none';
                 } else {
                     log(`Failed to fetch grades: ${data.error}`, 'error');
+                }
+
+            } catch (error) {
+                log(`Error: ${error.message}`, 'error');
+            }
+        });
+
+        attendanceButton.addEventListener('click', async () => {
+            log('Fetching attendance...');
+            try {
+                const response = await fetch('/fetch-attendance');
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    log(`Fetched attendance for ${data.attendance.length} days.`, 'success');
+                    renderAttendance(data.attendance);
+                    attendanceContainer.style.display = 'block';
+                    gradesContainer.style.display = 'none';
+                    statsContainer.style.display = 'none';
+                } else {
+                    log(`Failed to fetch attendance: ${data.error}`, 'error');
+                }
+
+            } catch (error) {
+                log(`Error: ${error.message}`, 'error');
+            }
+        });
+
+        statsButton.addEventListener('click', async () => {
+            log('Calculating attendance percentage (this may take a while)...');
+            try {
+                const response = await fetch('/calculate-attendance-percentage');
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    log(`Calculated stats for ${data.stats.length} subjects.`, 'success');
+                    renderStats(data.stats, data.summary);
+                    statsContainer.style.display = 'block';
+                    gradesContainer.style.display = 'none';
+                    attendanceContainer.style.display = 'none';
+                } else {
+                    log(`Failed to calculate stats: ${data.error}`, 'error');
                 }
 
             } catch (error) {
@@ -320,16 +425,76 @@
                     item.grades.forEach(g => {
                         const badge = document.createElement('span');
                         badge.className = 'grade-badge';
-                        badge.textContent = g;
+                        badge.textContent = g.grade;
+                        badge.title = `Waga: ${g.weight}`;
                         gradesCell.appendChild(badge);
                     });
                 } else {
                     gradesCell.textContent = '-';
                 }
 
+                const avgCell = document.createElement('td');
+                avgCell.innerHTML = `<strong>${item.average}</strong>`;
+
                 row.appendChild(subjectCell);
                 row.appendChild(gradesCell);
+                row.appendChild(avgCell);
                 gradesTableBody.appendChild(row);
+            });
+        }
+
+        function renderAttendance(attendance) {
+            attendanceList.innerHTML = '';
+            attendance.forEach(day => {
+                const dayDiv = document.createElement('div');
+                dayDiv.className = 'attendance-day';
+
+                const dateHeader = document.createElement('h4');
+                dateHeader.textContent = day.date;
+                dayDiv.appendChild(dateHeader);
+
+                day.absences.forEach(absence => {
+                    const absenceDiv = document.createElement('div');
+                    absenceDiv.className = 'absence-item';
+                    absenceDiv.innerHTML = `<strong>Lekcja ${absence.lessonNumber}:</strong> ${absence.lesson} - <em>${absence.type}</em>`;
+                    dayDiv.appendChild(absenceDiv);
+                });
+
+                attendanceList.appendChild(dayDiv);
+            });
+        }
+
+        function renderStats(stats, summary) {
+            statsSummary.innerHTML = `
+                <h4 style="margin: 0 0 10px 0;">Podsumowanie</h4>
+                <p><strong>Liczba przedmiotów:</strong> ${summary.totalSubjects}</p>
+                <p><strong>Średnia frekwencja:</strong> ${summary.averageAttendance}%</p>
+            `;
+
+            statsTableBody.innerHTML = '';
+            stats.forEach(item => {
+                const row = document.createElement('tr');
+
+                const until50Text = item.absencesUntil50Percent > 0
+                    ? `<span style="color: green;">${item.absencesUntil50Percent}</span>`
+                    : `<span style="color: red;">0 (już poniżej!)</span>`;
+
+                row.innerHTML = `
+                    <td>${item.subject}</td>
+                    <td>${item.totalLessons}</td>
+                    <td>${item.absences}</td>
+                    <td>${item.present}</td>
+                    <td><strong>${item.attendancePercentage}%</strong></td>
+                    <td>${until50Text}</td>
+                `;
+
+                if (item.attendancePercentage < 50) {
+                    row.style.backgroundColor = '#ffebee';
+                } else if (item.attendancePercentage < 80) {
+                    row.style.backgroundColor = '#fff3e0';
+                }
+
+                statsTableBody.appendChild(row);
             });
         }
     </script>
